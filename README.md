@@ -15,6 +15,11 @@
 - `4.14`
 - `4.9`
 
+## 设备适配：Redmi K20 Pro (raphael)
+
+已为本机（SM8150-AC / MIUI 12.5.6 / 4.14.180）调好 `config.env`，并新增 Docker 能力补充与编译后校验脚本。
+从构建、刷入到跑起 `dockerd` 的完整流程见 **[docs/DOCKER-K20PRO.md](docs/DOCKER-K20PRO.md)**。
+
 ## 使用
 
 > 所有 config.env 内的变量均只判断`true`
