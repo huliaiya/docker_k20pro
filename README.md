@@ -1,174 +1,126 @@
-**中文** | [English](README_EN.md)
+# Docker 内核 · Redmi K20 Pro (raphael)
 
-# KernelSU+LXC+DOCKER Action
+给 **Redmi K20 Pro / K20 Pro Premium（raphael / SM8150）** 编译一个能跑 Docker 的 4.14 内核，
+产物是可直接刷入的 `boot-docker.img`。
 
-用于 Non-GKI Kernel 的 Action，具有一定的普遍性，需要了解内核及 Android 的相关知识得以运用。
+不含 KernelSU、不含 NetHunter、不含 LXC。root 自己用 Magisk 或别的方式处理。
 
-## 警告:warning: :warning: :warning:
+---
 
-如果你不是内核作者，使用他人的劳动成果构建 KernelSU，请仅供自己使用，不要分享给别人，这是对原作者的劳动成果的尊重。
+## 适用设备
 
-## 支持内核
+| 项 | 值 |
+|---|---|
+| 机型 | Redmi K20 Pro / K20 Pro Premium（raphael） |
+| SoC | 骁龙 855 / 855+（SM8150 / SM8150-AC） |
+| 目标系统 | MIUI 12.5.6（RFKCNXM）/ Android 11 |
+| 内核基线 | 设备原厂 4.14.180，编译自 4.14.268 源码 |
 
-- `5.4`
-- `4.19`
-- `4.14`
-- `4.9`
+其它 ROM / 其它机型不保证能开机。刷之前先备份 boot 分区。
 
-## 设备适配：Redmi K20 Pro (raphael)
+---
 
-已为本机（SM8150-AC / MIUI 12.5.6 / 4.14.180）调好 `config.env`，并新增 Docker 能力补充与编译后校验脚本。
-从构建、刷入到跑起 `dockerd` 的完整流程见 **[docs/DOCKER-K20PRO.md](docs/DOCKER-K20PRO.md)**。
+## 产物
 
-## 使用
+一次构建只出一个文件：
 
-> 所有 config.env 内的变量均只判断`true`
+**`boot-docker.img`** —— 新内核已经替换进原厂 boot.img，
+`ramdisk` / `dtb` / `header` / `cmdline` 全部保留原样。
 
-> 编译成功后，会在`Action`上传 AnyKernel3，已经关闭设备检查，请在 Twrp 刷入。
+不是 AnyKernel3 卡刷包，不需要 Recovery 里跑脚本。直接刷镜像。
 
-Fork 本仓库到你的储存库然后按照以下内容编辑 config.env，之后点击`Star`或`Action`，在左侧可看见`Build Kernel`选项，点击选项会看见右边的大对话框的上面会有`Run workflows`点击它会启动构建。
+---
 
-### Kernel Source
+## 怎么用
 
-修改为你的内核仓库地址
+1. Actions → **Docker 内核 · raphael** → **Run workflow**
+2. 等 40~70 分钟
+3. 下载 Artifacts → `boot-docker-raphael` → 得到 `boot-docker.img`
 
-例如: https://github.com/Diva-Room/Miku_kernel_xiaomi_wayne
+流水线共 10 步：拉仓库 → 装依赖 → 下 clang → 拉内核源码 → 注入 Docker 配置 →
+编译 → 校验 → 准备 magiskboot → 塞进 boot.img → 上传。
 
-### Kernel Source Branch
+---
 
-修改为你的内核分支
+## 刷入
 
-例如: TDA
+```bash
+# 1) 备份原厂 boot —— 必做，这是后悔药
+adb shell su -c "dd if=/dev/block/bootdevice/by-name/boot of=/sdcard/boot_stock.img"
 
-### Kernel Config
+# 2) 刷入
+adb reboot bootloader
+fastboot flash boot boot-docker.img
+fastboot reboot
+```
 
-修改为你的内核配置文件名
+TWRP 也可以：安装 → 安装镜像 → 选 boot 分区 → 选 `boot-docker.img`。
 
-例如: vendor/wayne_defconfig
+**回滚**：同样方式刷回 `boot_stock.img`。
 
-### Arch
+---
 
-例如: arm64
+## 内核带了什么
 
-### Kernel Image Name
+配置由流水线在编译前注入，编译后 `DOCKER-VERIFY.sh` 逐项校验，缺一项直接构建失败：
 
-修改为需要刷写的 kernel binary，一般与你的 aosp-device tree 里的 BOARD_KERNEL_IMAGE_NAME 是一致的
+| 类别 | 关键项 |
+|---|---|
+| 命名空间 | `PID_NS` `NET_NS` `IPC_NS` `UTS_NS` `USER_NS` |
+| Cgroup v1 | `CGROUPS` `MEMCG` `CGROUP_DEVICE` `CGROUP_PIDS` `CPUSETS` `BLK_CGROUP` |
+| 网络 / 防火墙 | `VETH` `BRIDGE` `NF_NAT` `IP_NF_NAT` `MASQUERADE` `XT_MATCH_ADDRTYPE` `XT_MARK` |
+| 文件系统 | `OVERLAY_FS` `EXT4_FS` `F2FS_FS` `TMPFS_XATTR` `FHANDLE` |
+| IPC | `SYSVIPC` `POSIX_MQUEUE` |
+| 其它 | `SECCOMP` `SECCOMP_FILTER` `MODULES` `PSI` |
 
-例如: Image.gz-dtb
+原始 `raphael_defconfig` 在 Docker 场景下缺 27 项（`PID_NS` 和 `FHANDLE` 甚至是显式关闭的）。
+注入后用真实 kconfig 展开 6331 行 `.config`，校验结果 **致命缺失 0 项**。
 
-常见还有 Image、Image.gz
+### 两个已知限制
 
-### Clang
+- **`CFS_BANDWIDTH` 开不了**：`init/Kconfig` 里写的是 `depends on !SCHED_WALT`，
+  而高通 CAF 内核启用了 `SCHED_WALT`。代价是 `docker run --cpu-quota` 不生效，容器本身能正常跑。
+- **开 `MEMCG` 会挤掉 `ANDROID_SIMPLE_LMK`**（它 `depends on !MEMCG`）。
+  流水线补了 `CONFIG_PSI=y`，让 Android 11 的 lmkd 走压力停滞模式接管内存回收。
 
-#### Use custom clang
+---
 
-可以使用除 google 官方的 clang，如[proton-clang](https://github.com/kdrag0n/proton-clang)
+## 目录
 
-#### Custom Clang Source
+```
+.github/workflows/docker-kernel.yml   构建流水线（10 步）
+boot/boot-stock.img.xz                原厂 boot.img，供流水线替换内核用
+scripts/check-kernel-config/
+  LXC-DOCKER-OPEN-CONFIG.sh           注入 160 项容器相关配置
+  DOCKER-EXTRA-CONFIG.sh              补 4 项（SYSVIPC / TMPFS_XATTR / NET_CLASSID / PSI）
+  DOCKER-VERIFY.sh                    编译后校验，缺项直接失败
+docs/DOCKER-K20PRO.md                 从构建到跑起 dockerd 的完整流程
+docs/WORKFLOW-FIX.md                  workflow 手改指引（备用）
+```
 
-> 如果是 git 仓库，请填写包含`.git`的链接
+---
 
-支持 git 仓库或者 zip 压缩包的直链
+## 刷完之后：跑 Docker
 
-#### Custom cmds
+内核只是第一步，Android 本身没有 `dockerd`，还得在 chroot 的 Linux 里跑。
+完整步骤见 **[docs/DOCKER-K20PRO.md](docs/DOCKER-K20PRO.md)** 第 5 节，几个要点：
 
-都用自定义 clang 了，自己改改这些配置应该都会吧 :)
+- 需要 chroot 一个 arm64 的 Linux 发行版（Debian / Ubuntu 都行）
+- 4.14 内核没有 nftables，`iptables` 要切到 `iptables-legacy`
+- cgroup v1 要整个 `/sys/fs/cgroup` 透传进 chroot
+- `/etc/resolv.conf` 要自己写
+- `overlay2` 起不来就退到 `--storage-driver=vfs`
 
-#### Clang Branch
+---
 
-由于 [#23](https://github.com/xiaoleGun/KernelSU_Action/issues/23) 的需要，我们提供可自定义 Google 上游分支的选项，主要的有分支有
-| Clang 分支 |
-| ---------- |
-| main |
-| android-gs-bluejay-5.10-android13 |
-| android-msm-bonito-4.9-android12-qpr1 |
-| android-msm-coral-4.14-android13 |
+## 致谢
 
-或者其它分支，请根据自己的需求在 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 中寻找
+- 内核源码：[Laulan56/android_kernel_xiaomi_sm8150](https://github.com/Laulan56/android_kernel_xiaomi_sm8150)（`miui` 分支）
+- boot 解包/重打包：[Magisk](https://github.com/topjohnwu/Magisk) 的 `magiskboot`
+- 容器配置清单：[5kind/LXC-DOCKER-KernelSU_Action](https://github.com/5kind/LXC-DOCKER-KernelSU_Action)
 
-#### Clang version
+---
 
-填写需要使用的 Clang 版本
-| Clang 版本 | 对应 Android 版本 | AOSP-Clang 版本 |
-| ---------- | ----------------- | --------------- |
-| 12.0.5 | Android S | r416183b |
-| 14.0.6 | Android T | r450784d |
-| 14.0.7 | | r450784e |
-| 15.0.1 | | r458507 |
+## 免责
 
-一般 Clang12 就能通过大部分 4.14 及以上的内核的编译
-我自己的 MI 6X 4.19 使用的是 r450784d
-
-### GCC
-
-#### Enable GCC 64
-
-启用 GCC 64 交叉编译
-
-#### Enable GCC 32
-
-启用 GCC 32 交叉编译
-
-### Extra cmds
-
-有的内核需要加入一些其它编译命令，才能正常编译，一般不需要其它的命令，请自行搜索自己内核的资料
-请在命令与命令之间用空格隔开
-
-例如: LLVM=1 LLVM_IAS=1
-
-### Enable KernelSU
-
-启用 KernelSU，用于排查内核故障或单独编译内核
-
-#### KernelSU Branch or Tag
-
-选择 KernelSU 的分支或 tag:
-
-- main 分支(开发版): `KERNELSU_TAG=main`
-- 最新 TAG(稳定版): `KERNELSU_TAG=`
-- 指定 TAG(如`v0.5.2`): `KERNELSU_TAG=v0.5.2`
-
-### Disable LTO
-
-LTO 用于优化内核，但有些时候会导致错误
-
-### Disable CC_WERROR
-
-用于修复某些不支持或关闭了Kprobes的内核，修复KernelSU未检测到开启Kprobes的变量抛出警告导致错误
-
-### Add Kprobes Config
-
-自动在 defconfig 注入参数
-
-### Add overlayfs Config
-
-此参数为 KernelSU 模块和 system 分区读写提供支持
-自动在 defconfig 注入参数
-
-### Enable ccache
-
-启用缓存，让第二次编译内核更快，最少可以减少 2/5 的时间
-
-### Need DTBO
-
-上传 DTBO
-部分设备需要
-
-### Build Boot IMG
-
-> 从之前的 Workflows 合并进来的，可以查看历史提交
-
-编译 boot.img，需要你提供`Source boot image`
-
-### Source Boot Image
-
-故名思义，提供一个源系统可以正常开机的 boot 镜像，需要直链，最好是同一套内核源码以及与你当前系统同一套设备树从 aosp 构建出来的。ramdisk 里面包含分区表以及 init，没有的话构建出来的镜像会无法正常引导。
-
-例如: https://raw.githubusercontent.com/xiaoleGun/KernelSU_action/main/boot/boot-wayne-from-Miku-UI-latest.img
-
-## 感谢
-
-- [AnyKernel3](https://github.com/osm0sis/AnyKernel3)
-- [AOSP](https://android.googlesource.com)
-- [KernelSU](https://github.com/tiann/KernelSU)
-- [xiaoxindada](https://github.com/xiaoxindada)
+刷内核有风险，可能开不了机。刷之前备份 boot，出问题刷回去。
