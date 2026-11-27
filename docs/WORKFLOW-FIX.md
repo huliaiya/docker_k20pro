@@ -1,5 +1,9 @@
 # workflow 文件改不动？照这里改 5 处
 
+> **省事做法**：本目录下有个已经改好的完整文件 [`workflow-v4.yml`](workflow-v4.yml)。
+> 把它的**全文复制**，粘回 `.github/workflows/zbuild-kernel.yml` 的网页编辑器，直接提交即可，不用找那 5 处。
+> 下面是手动改的版本，想精确控制就用这个。
+
 GitHub App 没有 `workflows` 权限，`.github/workflows/*.yml` 无法通过 push 或 API 写入：
 
 ```
