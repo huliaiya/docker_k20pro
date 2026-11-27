@@ -1,6 +1,7 @@
 name: Docker 内核 · raphael
 
-# 只为 Redmi K20 Pro (raphael / SM8150) 编译一个支持 Docker 的 4.14 内核。
+# 为 Redmi K20 Pro (raphael / SM8150) 编译支持 Docker 的 4.14 内核，
+# 并直接替换进原厂 boot.img，产物只有一个可刷入的 boot-docker.img。
 # 不含 KernelSU、不含 NetHunter、不含 LXC。root 自己用 Magisk 处理。
 on:
   workflow_dispatch:
@@ -18,7 +19,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
-            device-tree-compiler zip unzip wget git
+            device-tree-compiler zip unzip xz-utils wget git
 
       - name: 下载 AOSP clang
         run: |
@@ -28,7 +29,7 @@ jobs:
           tar -C "$RUNNER_TEMP/clang" -zxf clang-r416183b.tar.gz
           # AOSP 仓库里很多版本目录是空占位，空目录打的包也能 200 下载
           if [ ! -x "$RUNNER_TEMP/clang/bin/clang" ]; then
-            echo "::error::clang 是空占位包。改用 config: master-kernel-build-2022 + r450784e"
+            echo "::error::clang 是空占位包。改用 master-kernel-build-2022 + r450784e"
             exit 1
           fi
           "$RUNNER_TEMP/clang/bin/clang" --version
@@ -67,22 +68,30 @@ jobs:
           scripts/extract-ikconfig out/arch/arm64/boot/Image.gz-dtb > "$CFG"
           bash "$GITHUB_WORKSPACE/scripts/check-kernel-config/DOCKER-VERIFY.sh" "$CFG"
 
-      - name: 打包 AnyKernel3
+      - name: 准备 magiskboot
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-          sed -i 's/^do\.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
-          sed -i 's!^BLOCK=.*!BLOCK=/dev/block/bootdevice/by-name/boot;!' AnyKernel3/anykernel.sh
-          sed -i 's/^kernel\.string=.*/kernel.string=raphael Docker Kernel/' AnyKernel3/anykernel.sh
-          cp ksrc/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cd AnyKernel3
-          zip -r -q ../AnyKernel3-raphael.zip .
-          cd ..
-          ls -lh AnyKernel3-raphael.zip
+          cd "$RUNNER_TEMP"
+          wget -q "https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
+          unzip -o -q Magisk-v27.0.apk "lib/x86_64/libmagiskboot.so" -d mbext
+          install -m 755 mbext/lib/x86_64/libmagiskboot.so magiskboot
+          ./magiskboot 2>&1 | head -n 3 || true
 
-      - name: 上传产物
+      - name: 把新内核塞进 boot.img
+        run: |
+          cd "$RUNNER_TEMP"
+          mkdir -p patch
+          cd patch
+          xz -dc "$GITHUB_WORKSPACE/boot/boot-stock.img.xz" > boot.img
+          "$RUNNER_TEMP/magiskboot" unpack boot.img
+          # 直接放 Image.gz-dtb，magiskboot 会自己识别格式并分离 dtb
+          cp "$GITHUB_WORKSPACE/ksrc/out/arch/arm64/boot/Image.gz-dtb" kernel
+          "$RUNNER_TEMP/magiskboot" repack boot.img boot-docker.img
+          ls -lh boot-docker.img
+          cp boot-docker.img "$GITHUB_WORKSPACE/boot-docker.img"
+
+      - name: 上传 boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: raphael-docker-kernel
-          path: |
-            AnyKernel3-raphael.zip
-            ksrc/out/arch/arm64/boot/Image.gz-dtb
+          name: boot-docker-raphael
+          path: boot-docker.img
+          if-no-files-found: error
