@@ -3,7 +3,7 @@
 目标设备：**Redmi K20 Pro Premium Edition / raphael / SM8150-AC**
 当前系统：MIUI 12.5.6 (RFKCNXM) / Android 11 / 内核 4.14.180-perf-gb24d1131198a
 
-本仓库 config.env 已按该设备配置好：编译 `Laulan56/android_kernel_xiaomi_sm8150` 的 `miui` 分支 + `raphael_defconfig`，产出带 KernelSU / LXC / Docker / NetHunter 支持的 `Image.gz-dtb`。
+本仓库已按该设备配好：编译 `Laulan56/android_kernel_xiaomi_sm8150` 的 `miui` 分支 + `raphael_defconfig`，产出带 Docker（namespace / cgroup / netfilter / overlayfs）支持的 `Image.gz-dtb`。不内置任何 root 方案。
 
 ---
 
@@ -27,7 +27,7 @@ DOCKER-EXTRA-CONFIG.sh      → 补 LXC 脚本漏掉的 3 项（SYSVIPC / TMPFS_
 DOCKER-VERIFY.sh            → 编译后校验产物 .config，缺一项就让构建失败
 ```
 
-实测：原始 defconfig 缺口 27 项 → 跑完前两个脚本 + KSU 补充配置后，用真实 kconfig（`make ARCH=arm64 raphael_defconfig`）展开 6331 行 `.config`，`DOCKER-VERIFY.sh` 报 **致命缺失 0 项**。
+实测：原始 defconfig 缺口 27 项 → 跑完两个注入脚本 + `MODULES`/`OVERLAY_FS` 补充后，用真实 kconfig（`make ARCH=arm64 raphael_defconfig`）展开 6331 行 `.config`，`DOCKER-VERIFY.sh` 报 **致命缺失 0 项**。
 
 ```
 CONFIG_PID_NS=y   CONFIG_USER_NS=y   CONFIG_NET_NS=y    CONFIG_IPC_NS=y
@@ -53,28 +53,23 @@ CONFIG_NF_NAT=y   CONFIG_SYSVIPC=y   CONFIG_MODULES=y   CONFIG_PSI=y
 
 ## 2. 构建
 
+> **用 `docs/docker-kernel.yml` 这个独立 workflow**（9 步，只做 Docker 内核，不碰 KSU/NetHunter）。
+> 仓库里旧的 `zbuild-kernel.yml` 保留作参考，不要用它。
+>
 > 推荐用 GitHub Actions：x86 runner + AOSP clang，40~70 分钟出包。
 > 本机（proot 里的 aarch64 Ubuntu）编同样内核实测约 0.6s/目标文件，全量要几小时，不划算。
 
-1. Fork 本仓库到自己的账号，或直接 push 到现有仓库。
-2. `config.env` 已配好，不需要改：
+把 `docs/docker-kernel.yml` 全文复制，在 GitHub 网页新建 `.github/workflows/docker-kernel.yml` 粘贴提交，然后 Actions 里手动跑。
 
-   ```ini
-   KERNEL_SOURCE=https://github.com/Laulan56/android_kernel_xiaomi_sm8150
-   KERNEL_SOURCE_BRANCH=miui
-   KERNEL_CONFIG=raphael_defconfig
-   KERNEL_IMAGE_NAME=Image.gz-dtb     # 该树 CONFIG_IMG_GZ_DTB=y，产物就是这个名字
-   ENABLE_KERNELSU=false              # 纯 Docker 内核，不内置 root
-   BUILD_BOOT_IMG=false               # 只出 AnyKernel3 + 原始内核
-   ```
+它硬编码了这台机的参数，不读 `config.env`：
 
-3. Actions → **编译 ksu docker lxc nethunter 内核** → Run workflow。
-4. 产物（Artifacts）：
-
-   | 文件 | 用途 |
-   |---|---|
-   | `AnyKernel3-raphael-<时间>.zip` | **TWRP 直接刷**，只换内核，保留原机 ramdisk/dtb |
-   | `Image.gz-dtb-raphael-<时间>` | 裸内核，用于自己修补 boot.img 或 fastboot |
+```yaml
+源码     Laulan56/android_kernel_xiaomi_sm8150 @ miui
+配置     raphael_defconfig
+产物     Image.gz-dtb
+工具链   AOSP clang r416183b + 系统 binutils
+开关     关了 DEBUG_INFO、关了 ANDROID_PARANOID_NETWORK、不装 KSU/NetHunter
+```
 
 > 构建日志末尾会打印 `Docker 能力校验` 结果。看到 `致命缺失 0 项` 才继续往下走。
 
@@ -128,10 +123,8 @@ KERNEL_DTB_SZ   [1995189]       # dtb 是单独一段
 
 因为 `ramdisk_size=0`，Magisk 无法用常规方式往 ramdisk 里注入 `magiskinit`。要 root 只有两条路：
 
-- 刷一个自带 KernelSU 的内核（把 `config.env` 里 `ENABLE_KERNELSU` 改回 `true`，`KERNELSU_TAG` 必须是 `v0.9.5`）
-- 用 Magisk 的“安装到未激活的槽位/其他方式”——本机单槽且无 ramdisk，成功率低
-
-**纯 Docker 用途不需要 root 之外的东西**：只要内核带 namespace/cgroup/netfilter/overlayfs，root 用哪种方案都行。
+- 刷一个自带 root 方案的内核（例如自己集成 KernelSU），或用其他能拿到 root 的方式
+- 纯 Docker 用途不强制要求特定 root 方案：只要内核带 namespace/cgroup/netfilter/overlayfs，root 怎么来的都行。
 
 ### 自己修补 boot.img（不经 TWRP）
 
@@ -253,7 +246,6 @@ sleep 5 && docker info
 | 容器内无网络 | `ip_forward=0` 或 MIUI 防火墙链拦截 | `echo 1 > /proc/sys/net/ipv4/ip_forward`，检查 `iptables -t nat -L POSTROUTING` |
 | 容器内 DNS 失败 | 没有 `/etc/resolv.conf` | 见 5.1 脚本里的 DNS 段 |
 | 内核刷完不开机 | ramdisk/dtb 不匹配 | 用 AnyKernel3 方式刷入（保留原机 ramdisk），别用 boot.img 重打包 |
-| 管理器连不上内核 | KSU 管理器版本与内核版本不一致 | 内核 0.9.5 → 管理器必须 0.9.5 |
 
 ---
 

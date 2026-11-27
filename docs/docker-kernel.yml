@@ -1,0 +1,88 @@
+name: Docker 内核 · raphael
+
+# 只为 Redmi K20 Pro (raphael / SM8150) 编译一个支持 Docker 的 4.14 内核。
+# 不含 KernelSU、不含 NetHunter、不含 LXC。root 自己用 Magisk 处理。
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            device-tree-compiler zip unzip wget git
+
+      - name: 下载 AOSP clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/clang"
+          cd "$RUNNER_TEMP"
+          wget -q "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android-msm-coral-4.14-android13/clang-r416183b.tar.gz"
+          tar -C "$RUNNER_TEMP/clang" -zxf clang-r416183b.tar.gz
+          # AOSP 仓库里很多版本目录是空占位，空目录打的包也能 200 下载
+          if [ ! -x "$RUNNER_TEMP/clang/bin/clang" ]; then
+            echo "::error::clang 是空占位包。改用 config: master-kernel-build-2022 + r450784e"
+            exit 1
+          fi
+          "$RUNNER_TEMP/clang/bin/clang" --version
+
+      - name: 拉取内核源码
+        run: |
+          git clone --depth=1 -b miui \
+            https://github.com/Laulan56/android_kernel_xiaomi_sm8150 ksrc
+          cd ksrc
+          git submodule update --init --recursive --depth=1
+
+      - name: 注入 Docker 内核配置
+        run: |
+          cd ksrc
+          CFG=arch/arm64/configs/raphael_defconfig
+          bash "$GITHUB_WORKSPACE/scripts/check-kernel-config/LXC-DOCKER-OPEN-CONFIG.sh" "$CFG" -w
+          bash "$GITHUB_WORKSPACE/scripts/check-kernel-config/DOCKER-EXTRA-CONFIG.sh" "$CFG" -w
+          scripts/config --file "$CFG" --enable  CONFIG_MODULES
+          scripts/config --file "$CFG" --enable  CONFIG_OVERLAY_FS
+          scripts/config --file "$CFG" --disable CONFIG_ANDROID_PARANOID_NETWORK
+          scripts/config --file "$CFG" --disable CONFIG_DEBUG_INFO
+          scripts/config --file "$CFG" --set-str CONFIG_LOCALVERSION "-K20Docker"
+
+      - name: 编译内核
+        run: |
+          cd ksrc
+          export PATH="$RUNNER_TEMP/clang/bin:$PATH"
+          FLAGS="ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          make -j"$(nproc)" O=out $FLAGS raphael_defconfig
+          make -j"$(nproc)" O=out $FLAGS Image.gz-dtb
+
+      - name: 校验 Docker 能力
+        run: |
+          cd ksrc
+          CFG="$RUNNER_TEMP/built.config"
+          scripts/extract-ikconfig out/arch/arm64/boot/Image.gz-dtb > "$CFG"
+          bash "$GITHUB_WORKSPACE/scripts/check-kernel-config/DOCKER-VERIFY.sh" "$CFG"
+
+      - name: 打包 AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          sed -i 's/^do\.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
+          sed -i 's!^BLOCK=.*!BLOCK=/dev/block/bootdevice/by-name/boot;!' AnyKernel3/anykernel.sh
+          sed -i 's/^kernel\.string=.*/kernel.string=raphael Docker Kernel/' AnyKernel3/anykernel.sh
+          cp ksrc/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          zip -r -q ../AnyKernel3-raphael.zip .
+          cd ..
+          ls -lh AnyKernel3-raphael.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-docker-kernel
+          path: |
+            AnyKernel3-raphael.zip
+            ksrc/out/arch/arm64/boot/Image.gz-dtb
